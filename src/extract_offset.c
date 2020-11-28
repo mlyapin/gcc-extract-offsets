@@ -3,6 +3,8 @@
 #include "stringpool.h"
 #include "attribs.h"
 
+#include "list.h"
+
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +17,7 @@
 #define DEFAULT_ATTRIBUTE  ("extract_offset")
 #define DEFAULT_OUTPUT     ("/dev/stdout")
 #define DEFAULT_CAPITALIZE (false)
-#define DEFAULT_PREFIX     ("OFFSET")
+#define DEFAULT_PREFIX     ("OFFSET_")
 
 int plugin_is_GPL_compatible;
 
@@ -30,12 +32,13 @@ struct config {
 struct data {
         struct config config;
         struct attribute_spec attr;
+        struct list handled_records;
         FILE *outputf;
-};
+} DATA;
 
-static bool should_export(tree decl, struct data *data)
+static bool should_export(tree decl)
 {
-        tree attr = lookup_attribute(data->config.match_attribute, DECL_ATTRIBUTES(decl));
+        tree attr = lookup_attribute(DATA.config.match_attribute, DECL_ATTRIBUTES(decl));
         return (attr != NULL_TREE);
 }
 
@@ -56,60 +59,63 @@ static size_t get_field_offset(tree field)
         return (overall_offset);
 }
 
-static void strncpycap(char *dest, const char *src, size_t len)
+static char *strncpycap(char *dest, const char *src, size_t len)
 {
         for (int i = 0; i < len; i++) {
                 dest[i] = TOUPPER(src[i]);
         }
+        return (dest);
 }
 
-static void write_offset(const char *struct_name, const char *field_name, size_t offset,
-                         struct data *data)
+static void save_offset(const char *struct_name, const char *field_name, size_t offset, tree parent)
 {
-        const char *stname = struct_name;
-        const char *fname = field_name;
-
-        if (data->config.capitalize) {
-                const size_t slen = strlen(struct_name) + 1;
-                char *s = (char *)xmalloc(slen * sizeof(*struct_name));
-                strncpycap(s, struct_name, slen);
-
-                const size_t flen = strlen(field_name) + 1;
-                char *f = (char *)xmalloc(flen * sizeof(*field_name));
-                strncpycap(f, field_name, flen);
-
-                stname = s;
-                fname = f;
+        if (list_contains(&DATA.handled_records, parent)) {
+                return;
         }
+
+        const size_t slen = strlen(struct_name);
+        const size_t flen = strlen(field_name);
+        const size_t seplen = strlen(DATA.config.separator);
+        // 1+ for null char.
+        const size_t len = slen + flen + seplen + 1;
+
+        char *fullname = (char *)xmalloc(len * sizeof(*fullname));
+        gcc_assert(fullname);
+
+        typedef char *(*cpyf)(char *dest, const char *src, size_t len);
+        cpyf f = DATA.config.capitalize ? strncpycap : strncpy;
+
+        f(&fullname[0], struct_name, slen);
+        f(&fullname[slen], DATA.config.separator, seplen);
+        f(&fullname[slen + seplen], field_name, flen);
+        fullname[slen + seplen + flen] = '\0';
+        gcc_assert(strlen(fullname) == len - 1);
 
         gcc_assert(offset % 8 == 0);
-        fprintf(data->outputf, "#define %s%s%s%s%s (%zu)\n", data->config.prefix,
-                data->config.separator, stname, data->config.separator, fname, offset / 8);
-
-        if (data->config.capitalize) {
-                free((void *)stname);
-                free((void *)fname);
-        }
+        fprintf(DATA.outputf, "#define %s%s (%zu)\n", DATA.config.prefix, fullname, offset / 8);
 }
 
-static void handle_struct_type(tree decl, const char *parent_name, size_t base_offset,
-                               struct data *data)
+static void handle_struct_type(tree decl, const char *parent_name, size_t base_offset)
 {
         gcc_assert(TREE_CODE(decl) == RECORD_TYPE);
+
+        if (list_contains(&DATA.handled_records, decl)) {
+                return;
+        }
 
         tree struct_id = TYPE_IDENTIFIER(decl);
         // Anonymous structures don't have type-names.
         const char *struct_name = (struct_id != NULL) ? IDENTIFIER_POINTER(struct_id) : parent_name;
 
         for (tree field = TYPE_FIELDS(decl); field != NULL; field = TREE_CHAIN(field)) {
-                if (!should_export(field, data)) {
+                if (!should_export(field)) {
                         continue;
                 }
 
                 const char *field_name = IDENTIFIER_POINTER(DECL_NAME(field));
                 const size_t field_offset = base_offset + get_field_offset(field);
 
-                write_offset(struct_name, field_name, field_offset, data);
+                save_offset(struct_name, field_name, field_offset, decl);
 
                 tree field_type = TREE_TYPE(field);
                 bool is_structure = TREE_CODE(field_type) == RECORD_TYPE;
@@ -118,31 +124,31 @@ static void handle_struct_type(tree decl, const char *parent_name, size_t base_o
                 if (is_structure && field_struct_anon) {
                         const size_t prename_len = strlen(struct_name);
                         const size_t fieldname_len = strlen(field_name);
-                        const size_t separator_len = strlen(data->config.separator);
+                        const size_t separator_len = strlen(DATA.config.separator);
 
                         char *struct_prefix =
                                 (char *)xmalloc(prename_len + fieldname_len + separator_len);
                         strcpy(struct_prefix, struct_name);
-                        strcpy(&struct_prefix[prename_len], data->config.separator);
+                        strcpy(&struct_prefix[prename_len], DATA.config.separator);
                         strcpy(&struct_prefix[prename_len + separator_len], field_name);
 
-                        handle_struct_type(field_type, struct_prefix, field_offset, data);
+                        handle_struct_type(field_type, struct_prefix, field_offset);
 
                         free(struct_prefix);
                 }
         }
+
+        list_add(&DATA.handled_records, decl);
 }
 
-static void handle_attributes(void *gcc_data __unused, void *user_data)
+static void handle_attributes(void *gcc_data __unused, void *user_data __unused)
 {
-        struct data *d = (struct data *)user_data;
-        register_attribute(&d->attr);
+        register_attribute(&DATA.attr);
 }
 
-static void handle_finish_type(void *gcc_data, void *user_data)
+static void handle_finish_type(void *gcc_data, void *user_data __unused)
 {
         tree type_decl = (tree)gcc_data;
-        struct data *data = (struct data *)user_data;
 
         // Interested only in structs.
         if (TREE_CODE(type_decl) != RECORD_TYPE) {
@@ -158,13 +164,13 @@ static void handle_finish_type(void *gcc_data, void *user_data)
         }
 
         // Prefix will be prepended only to anonymous structures.
-        handle_struct_type(type_decl, NULL, 0, data);
+        handle_struct_type(type_decl, NULL, 0);
 }
 
-static void handle_finish(void *gcc_data __unused, void *user_data)
+static void handle_finish(void *gcc_data __unused, void *user_data __unused)
 {
-        struct data *data = (struct data *)user_data;
-        fclose(data->outputf);
+        list_destroy(&DATA.handled_records);
+        fclose(DATA.outputf);
 }
 
 static struct config parse_args(int argc, struct plugin_argument *argv)
@@ -200,27 +206,27 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
 int plugin_init(struct plugin_name_args *info, struct plugin_gcc_version *version __unused)
 {
         // TODO: Version check
-        static struct data data = { 0 };
-
-        data.config = parse_args(info->argc, info->argv);
-        if (data.config.output_file == NULL) {
+        DATA.config = parse_args(info->argc, info->argv);
+        if (DATA.config.output_file == NULL) {
                 fprintf(stderr, "Provide location where to write output\n");
                 return (EXIT_FAILURE);
         }
 
-        data.outputf = fopen(data.config.output_file, "w+");
-        if (data.outputf == NULL) {
+        DATA.outputf = fopen(DATA.config.output_file, "w+");
+        if (DATA.outputf == NULL) {
                 perror("Couldn't open output file");
                 return (EXIT_FAILURE);
         }
 
-        data.attr = (struct attribute_spec){
-                data.config.match_attribute, 0, 0, false, false, false, false, NULL
+        DATA.attr = (struct attribute_spec){
+                DATA.config.match_attribute, 0, 0, false, false, false, false, NULL
         };
 
-        register_callback(info->base_name, PLUGIN_FINISH, handle_finish, &data);
-        register_callback(info->base_name, PLUGIN_FINISH_TYPE, handle_finish_type, &data);
-        register_callback(info->base_name, PLUGIN_ATTRIBUTES, handle_attributes, &data);
+        list_init(&DATA.handled_records);
+
+        register_callback(info->base_name, PLUGIN_FINISH, handle_finish, NULL);
+        register_callback(info->base_name, PLUGIN_FINISH_TYPE, handle_finish_type, NULL);
+        register_callback(info->base_name, PLUGIN_ATTRIBUTES, handle_attributes, NULL);
 
         return (EXIT_SUCCESS);
 }

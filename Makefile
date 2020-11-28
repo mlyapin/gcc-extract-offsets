@@ -8,7 +8,7 @@ SOURCES = $(wildcard src/*.c)
 CPPFLAGS += -I$(GCCPLUGINS_DIR)/include
 
 ifeq ($(findstring 1,$(NDEBUG)),1)
-	CFLAGS += -O3
+	CFLAGS += -O3 -flto
 else
 	CFLAGS += -O0 -g
 endif
