@@ -13,11 +13,11 @@
 
 #define __unused __attribute__((unused))
 
-#define DEFAULT_SEPARATOR  ("_")
+#define DEFAULT_SEPARATOR  ("::")
 #define DEFAULT_ATTRIBUTE  ("extract_offset")
 #define DEFAULT_OUTPUT     ("/dev/stdout")
 #define DEFAULT_CAPITALIZE (false)
-#define DEFAULT_PREFIX     ("OFFSET_")
+#define DEFAULT_PREFIX     ("")
 
 int plugin_is_GPL_compatible;
 
@@ -49,7 +49,7 @@ static size_t get_field_offset(tree field)
         gcc_assert(TREE_CODE(offset) == INTEGER_CST);
         gcc_assert(TREE_CODE(bitoffset) == INTEGER_CST);
 
-        // TODO: Not sure about the length of HOST_WIDE_INT.
+        // TODO: Check the length of HOST_WIDE_INT.
         size_t overall_offset = TREE_INT_CST_LOW(offset) + TREE_INT_CST_LOW(bitoffset);
         gcc_assert(TREE_INT_CST_LOW(offset) >= 0);
         gcc_assert(TREE_INT_CST_LOW(bitoffset) >= 0);
@@ -67,12 +67,8 @@ static char *strncpycap(char *dest, const char *src, size_t len)
         return (dest);
 }
 
-static void save_offset(const char *struct_name, const char *field_name, size_t offset, tree parent)
+static void save_offset(const char *struct_name, const char *field_name, size_t offset)
 {
-        if (list_contains(&DATA.handled_records, parent)) {
-                return;
-        }
-
         const size_t slen = strlen(struct_name);
         const size_t flen = strlen(field_name);
         const size_t seplen = strlen(DATA.config.separator);
@@ -92,7 +88,7 @@ static void save_offset(const char *struct_name, const char *field_name, size_t 
         gcc_assert(strlen(fullname) == len - 1);
 
         gcc_assert(offset % 8 == 0);
-        fprintf(DATA.outputf, "#define %s%s (%zu)\n", DATA.config.prefix, fullname, offset / 8);
+        fprintf(DATA.outputf, "%s%s %zu\n", DATA.config.prefix, fullname, offset / 8);
 }
 
 static void handle_struct_type(tree decl, const char *parent_name, size_t base_offset)
@@ -108,14 +104,12 @@ static void handle_struct_type(tree decl, const char *parent_name, size_t base_o
         const char *struct_name = (struct_id != NULL) ? IDENTIFIER_POINTER(struct_id) : parent_name;
 
         for (tree field = TYPE_FIELDS(decl); field != NULL; field = TREE_CHAIN(field)) {
-                if (!should_export(field)) {
-                        continue;
-                }
-
                 const char *field_name = IDENTIFIER_POINTER(DECL_NAME(field));
                 const size_t field_offset = base_offset + get_field_offset(field);
 
-                save_offset(struct_name, field_name, field_offset, decl);
+                if (should_export(field)) {
+                        save_offset(struct_name, field_name, field_offset);
+                }
 
                 tree field_type = TREE_TYPE(field);
                 bool is_structure = TREE_CODE(field_type) == RECORD_TYPE;
@@ -156,14 +150,13 @@ static void handle_finish_type(void *gcc_data, void *user_data __unused)
         }
 
         // Ignore anonymous structs. They will be handled as parts of parent structures.
-        // There is a problem with global anonymous structures though...
+        // There is a problem with global anonymous structures though, so...
         // TODO: Handle global anonymous structures.
         bool anonymous_struct = TYPE_IDENTIFIER(type_decl) == NULL;
         if (anonymous_struct) {
                 return;
         }
 
-        // Prefix will be prepended only to anonymous structures.
         handle_struct_type(type_decl, NULL, 0);
 }
 
@@ -186,19 +179,22 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
         for (int i = 0; i < argc; i++) {
                 struct plugin_argument arg = argv[i];
 
-                if (strcmp(arg.key, "attribute") == 0) {
+                #define argument_is(KEY) (strncmp(arg.key, (KEY), strlen(KEY)) == 0)
+
+                if (argument_is("attribute")) {
                         c.match_attribute = arg.value;
-                } else if (strcmp(arg.key, "output") == 0) {
+                } else if (argument_is("output")) {
                         c.output_file = arg.value;
-                } else if (strcmp(arg.key, "separator") == 0) {
+                } else if (argument_is("separator")) {
                         c.separator = arg.value;
-                } else if (strcmp(arg.key, "capitalize") == 0) {
+                } else if (argument_is("capitalize")) {
                         c.capitalize = true;
-                } else if (strcmp(arg.key, "prefix") == 0) {
+                } else if (argument_is("prefix")) {
                         c.prefix = arg.value;
                 } else {
                         fprintf(stderr, "Unknown argument: %s\n", arg.key);
                 }
+                #undef argument_is
         }
         return (c);
 }
@@ -207,10 +203,7 @@ int plugin_init(struct plugin_name_args *info, struct plugin_gcc_version *versio
 {
         // TODO: Version check
         DATA.config = parse_args(info->argc, info->argv);
-        if (DATA.config.output_file == NULL) {
-                fprintf(stderr, "Provide location where to write output\n");
-                return (EXIT_FAILURE);
-        }
+        gcc_assert(DATA.config.output_file);
 
         DATA.outputf = fopen(DATA.config.output_file, "w+");
         if (DATA.outputf == NULL) {
