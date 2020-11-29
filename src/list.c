@@ -28,7 +28,6 @@ void list_add(struct list *l, tree record_type)
 {
         gcc_assert(l != NULL);
         gcc_assert(TYPE_P(record_type));
-        gcc_assert(TREE_CODE(record_type) == RECORD_TYPE);
 
         struct list_node *newnode = (struct list_node *)xmalloc(sizeof(*newnode));
         gcc_assert(newnode);
@@ -42,7 +41,6 @@ bool list_contains(struct list *l, tree record_type)
 {
         gcc_assert(l != NULL);
         gcc_assert(TYPE_P(record_type));
-        gcc_assert(TREE_CODE(record_type) == RECORD_TYPE);
 
         struct list_node *cursor = l->head;
         while (cursor != NULL) {

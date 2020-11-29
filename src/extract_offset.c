@@ -13,10 +13,6 @@
 
 #define __unused __attribute__((unused))
 
-// TODO: Rewrite the whole thing to run on PLUGIN_OVERRIDE_GATE.
-// Then I could parse the already prepared AST from the root.
-// This way they will be no problems with handling anonymous structures and ~typedef struct {} some_t~ things.
-
 #define DEFAULT_SEPARATOR  ("::")
 #define DEFAULT_ATTRIBUTE  ("extract_offset")
 #define DEFAULT_OUTPUT     ("/dev/stdout")
@@ -48,6 +44,33 @@ static bool should_export(tree decl)
         return (attr != NULL_TREE);
 }
 
+static bool struct_or_union(tree t)
+{
+        tree type = DECL_P(t) ? TREE_TYPE(t) : t;
+
+        return (TREE_CODE(type) == RECORD_TYPE || TREE_CODE(type) == UNION_TYPE);
+}
+
+static bool is_anonymous(tree t)
+{
+        tree type = DECL_P(t) ? TREE_TYPE(t) : t;
+
+        return (TYPE_IDENTIFIER(t) == NULL);
+}
+
+static const char *get_name_or_default(tree tnode, const char *def)
+{
+        gcc_assert(DECL_P(tnode) || TYPE_P(tnode));
+        tree t;
+        if (DECL_P(tnode)) {
+                t = DECL_NAME(tnode);
+        } else {
+                t = TYPE_IDENTIFIER(tnode);
+        }
+
+        return (t != NULL ? IDENTIFIER_POINTER(t) : def);
+}
+
 static size_t get_field_bitoffset(tree field)
 {
         tree offset = DECL_FIELD_OFFSET(field);
@@ -73,9 +96,9 @@ static char *strncpycap(char *dest, const char *src, size_t len)
         return (dest);
 }
 
-static void save_offset(const char *struct_name, const char *field_name, size_t offset)
+static void save_offset(const char *cons_name, const char *field_name, size_t offset)
 {
-        const size_t slen = strlen(struct_name);
+        const size_t slen = strlen(cons_name);
         const size_t flen = strlen(field_name);
         const size_t seplen = strlen(DATA.config.separator);
         // 1+ for null char.
@@ -87,7 +110,7 @@ static void save_offset(const char *struct_name, const char *field_name, size_t 
         typedef char *(*cpyf)(char *dest, const char *src, size_t len);
         cpyf f = DATA.config.capitalize ? strncpycap : strncpy;
 
-        f(&fullname[0], struct_name, slen);
+        f(&fullname[0], cons_name, slen);
         f(&fullname[slen], DATA.config.separator, seplen);
         f(&fullname[slen + seplen], field_name, flen);
         fullname[slen + seplen + flen] = '\0';
@@ -95,75 +118,95 @@ static void save_offset(const char *struct_name, const char *field_name, size_t 
 
         gcc_assert(offset % 8 == 0);
         fprintf(DATA.outputf, "%s%s %zu\n", DATA.config.prefix, fullname, offset / 8);
+
+        free(fullname);
 }
 
-static void handle_struct_type(tree decl, const char *parent_name, size_t base_offset)
+static void process_construct(tree construct, const char *parent_name, size_t base_offset)
 {
-        gcc_assert(TREE_CODE(decl) == RECORD_TYPE);
+        gcc_assert(struct_or_union(construct));
 
-        if (list_contains(&DATA.handled_records, decl)) {
+        if (list_contains(&DATA.handled_records, construct)) {
                 return;
         }
 
-        tree struct_id = TYPE_IDENTIFIER(decl);
-        // Anonymous structures don't have type-names.
-        const char *struct_name = (struct_id != NULL) ? IDENTIFIER_POINTER(struct_id) : parent_name;
+        const char *cons_namestr = get_name_or_default(construct, parent_name);
 
-        for (tree field = TYPE_FIELDS(decl); field != NULL; field = TREE_CHAIN(field)) {
-                const char *field_name = IDENTIFIER_POINTER(DECL_NAME(field));
+        for (tree field = TYPE_FIELDS(construct); field != NULL; field = TREE_CHAIN(field)) {
+                const char *field_namestr = get_name_or_default(field, NULL);
                 const size_t field_offset = base_offset + get_field_bitoffset(field);
 
                 if (should_export(field)) {
-                        save_offset(struct_name, field_name, field_offset);
+                        if (field_namestr != NULL) {
+                                save_offset(cons_namestr, field_namestr, field_offset);
+                        } else {
+                                fprintf(stderr, "Can't export the anonymous construct without a name at %s:%d\n",
+                                        DECL_SOURCE_FILE(field), DECL_SOURCE_LINE(field));
+                        }
                 }
 
                 tree field_type = TREE_TYPE(field);
-                bool is_structure = TREE_CODE(field_type) == RECORD_TYPE;
                 // If it's not anonymous, we will handle it on another PLUGIN_FINISH_TYPE callback.
-                bool field_struct_anon = TYPE_IDENTIFIER(field_type) == NULL;
-                if (is_structure && field_struct_anon) {
-                        const size_t prename_len = strlen(struct_name);
-                        const size_t fieldname_len = strlen(field_name);
-                        const size_t separator_len = strlen(DATA.config.separator);
+                if (struct_or_union(field_type) && is_anonymous(field_type)) {
+                        // Some fields may be anonymous constructs, and don't have names, for example:
+                        // struct some {
+                        //         union {
+                        //                 int64_t ax;
+                        //                 struct {
+                        //                         int32_t ah;
+                        //                         int32_t al;
+                        //                 };
+                        //         };
+                        // } s;
+                        // In this example we can access the fields with as s.ax, s.ah and s.al.
+                        // Therefore, there is no need to mention inner union and struct.
 
-                        char *struct_prefix =
-                                (char *)xmalloc(prename_len + fieldname_len + separator_len);
-                        strcpy(struct_prefix, struct_name);
-                        strcpy(&struct_prefix[prename_len], DATA.config.separator);
-                        strcpy(&struct_prefix[prename_len + separator_len], field_name);
+                        if (field_namestr == NULL) {
+                                process_construct(field_type, cons_namestr, field_offset);
+                        } else {
+                                const size_t cons_namelen = strlen(cons_namestr);
+                                const size_t fieldname_len = strlen(field_namestr);
+                                const size_t separator_len = strlen(DATA.config.separator);
 
-                        handle_struct_type(field_type, struct_prefix, field_offset);
+                                char *field_fullname = (char *)xmalloc(
+                                        cons_namelen + fieldname_len + separator_len + 1);
+                                strcpy(field_fullname, cons_namestr);
+                                strcpy(&field_fullname[cons_namelen], DATA.config.separator);
+                                strcpy(&field_fullname[cons_namelen + separator_len],
+                                       field_namestr);
 
-                        free(struct_prefix);
+                                process_construct(field_type, field_fullname, field_offset);
+
+                                free(field_fullname);
+                        }
                 }
         }
 
-        list_add(&DATA.handled_records, decl);
+        list_add(&DATA.handled_records, construct);
 }
 
-static void handle_attributes(void *gcc_data __unused, void *user_data __unused)
+static void process_type(void *gcc_data, void *user_data __unused)
 {
-        register_attribute(&DATA.attr);
-}
-
-static void handle_finish_type(void *gcc_data, void *user_data __unused)
-{
-        tree type_decl = (tree)gcc_data;
+        tree type = (tree)gcc_data;
 
         // Interested only in structs.
-        if (TREE_CODE(type_decl) != RECORD_TYPE) {
+        if (!struct_or_union(type)) {
                 return;
         }
 
         // Ignore anonymous structs. They will be handled as parts of parent structures.
         // There is a problem with global anonymous structures though, so...
         // TODO: Handle global anonymous structures.
-        bool anonymous_struct = TYPE_IDENTIFIER(type_decl) == NULL;
-        if (anonymous_struct) {
+        if (is_anonymous(type)) {
                 return;
         }
 
-        handle_struct_type(type_decl, NULL, 0);
+        process_construct(type, NULL, 0);
+}
+
+static void handle_attributes(void *gcc_data __unused, void *user_data __unused)
+{
+        register_attribute(&DATA.attr);
 }
 
 static void handle_finish(void *gcc_data __unused, void *user_data __unused)
@@ -186,7 +229,7 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
         for (int i = 0; i < argc; i++) {
                 struct plugin_argument arg = argv[i];
 
-                #define argument_is(KEY) (strncmp(arg.key, (KEY), strlen(KEY)) == 0)
+#define argument_is(KEY) (strncmp(arg.key, (KEY), strlen(KEY)) == 0)
 
                 if (argument_is("attribute")) {
                         c.match_attribute = arg.value;
@@ -203,7 +246,7 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
                 } else {
                         fprintf(stderr, "Unknown argument: %s\n", arg.key);
                 }
-                #undef argument_is
+#undef argument_is
         }
         return (c);
 }
@@ -227,8 +270,8 @@ int plugin_init(struct plugin_name_args *info, struct plugin_gcc_version *versio
 
         list_init(&DATA.handled_records);
 
+        register_callback(info->base_name, PLUGIN_FINISH_TYPE, process_type, NULL);
         register_callback(info->base_name, PLUGIN_FINISH, handle_finish, NULL);
-        register_callback(info->base_name, PLUGIN_FINISH_TYPE, handle_finish_type, NULL);
         register_callback(info->base_name, PLUGIN_ATTRIBUTES, handle_attributes, NULL);
 
         return (EXIT_SUCCESS);
