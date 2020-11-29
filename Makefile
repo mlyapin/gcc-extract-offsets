@@ -15,9 +15,9 @@ endif
 
 .PHONY: build_dirs all
 
-all: $(BUILDDIR)/extract.so
+all: $(BUILDDIR)/extract_offsets.so
 
-$(BUILDDIR)/extract.so: $(SOURCES) | build_dirs
+$(BUILDDIR)/extract_offsets.so: $(SOURCES) | build_dirs
 	@$(CXX) -shared -fpic $(CPPFLAGS) $(CFLAGS) $^ -o $@
 
 clean:
