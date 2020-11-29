@@ -13,10 +13,15 @@
 
 #define __unused __attribute__((unused))
 
+// TODO: Rewrite the whole thing to run on PLUGIN_OVERRIDE_GATE.
+// Then I could parse the already prepared AST from the root.
+// This way they will be no problems with handling anonymous structures and ~typedef struct {} some_t~ things.
+
 #define DEFAULT_SEPARATOR  ("::")
 #define DEFAULT_ATTRIBUTE  ("extract_offset")
 #define DEFAULT_OUTPUT     ("/dev/stdout")
 #define DEFAULT_CAPITALIZE (false)
+#define DEFAULT_APPEND     (false)
 #define DEFAULT_PREFIX     ("")
 
 int plugin_is_GPL_compatible;
@@ -27,6 +32,7 @@ struct config {
         const char *separator;
         const char *prefix;
         bool capitalize;
+        bool append;
 };
 
 struct data {
@@ -174,6 +180,7 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
                 .separator = DEFAULT_SEPARATOR,
                 .prefix = DEFAULT_PREFIX,
                 .capitalize = DEFAULT_CAPITALIZE,
+                .append = DEFAULT_APPEND,
         };
 
         for (int i = 0; i < argc; i++) {
@@ -191,6 +198,8 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
                         c.capitalize = true;
                 } else if (argument_is("prefix")) {
                         c.prefix = arg.value;
+                } else if (argument_is("append")) {
+                        c.append = true;
                 } else {
                         fprintf(stderr, "Unknown argument: %s\n", arg.key);
                 }
@@ -205,7 +214,8 @@ int plugin_init(struct plugin_name_args *info, struct plugin_gcc_version *versio
         DATA.config = parse_args(info->argc, info->argv);
         gcc_assert(DATA.config.output_file);
 
-        DATA.outputf = fopen(DATA.config.output_file, "w+");
+        const char *fmode = DATA.config.append ? "a" : "w";
+        DATA.outputf = fopen(DATA.config.output_file, fmode);
         if (DATA.outputf == NULL) {
                 perror("Couldn't open output file");
                 return (EXIT_FAILURE);
