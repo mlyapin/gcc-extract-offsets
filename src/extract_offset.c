@@ -48,7 +48,7 @@ static bool should_export(tree decl)
         return (attr != NULL_TREE);
 }
 
-static size_t get_field_offset(tree field)
+static size_t get_field_bitoffset(tree field)
 {
         tree offset = DECL_FIELD_OFFSET(field);
         tree bitoffset = DECL_FIELD_BIT_OFFSET(field);
@@ -56,7 +56,7 @@ static size_t get_field_offset(tree field)
         gcc_assert(TREE_CODE(bitoffset) == INTEGER_CST);
 
         // TODO: Check the length of HOST_WIDE_INT.
-        size_t overall_offset = TREE_INT_CST_LOW(offset) + TREE_INT_CST_LOW(bitoffset);
+        size_t overall_offset = TREE_INT_CST_LOW(offset) * 8 + TREE_INT_CST_LOW(bitoffset);
         gcc_assert(TREE_INT_CST_LOW(offset) >= 0);
         gcc_assert(TREE_INT_CST_LOW(bitoffset) >= 0);
 
@@ -111,7 +111,7 @@ static void handle_struct_type(tree decl, const char *parent_name, size_t base_o
 
         for (tree field = TYPE_FIELDS(decl); field != NULL; field = TREE_CHAIN(field)) {
                 const char *field_name = IDENTIFIER_POINTER(DECL_NAME(field));
-                const size_t field_offset = base_offset + get_field_offset(field);
+                const size_t field_offset = base_offset + get_field_bitoffset(field);
 
                 if (should_export(field)) {
                         save_offset(struct_name, field_name, field_offset);
