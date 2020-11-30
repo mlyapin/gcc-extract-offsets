@@ -32,6 +32,7 @@ The plugin's behavior can be changed with the following arguments:
 | capitalize | /false/          | Flag indicating whether to capitalize the names of structures and fields or leave as is. |
 | prefix     | /none/           | String to prepend to each entry.                                                         |
 | append     | /false/          | Whether to append output to the output file or overwrite the file.                       |
+| max_length | 256              | The maximum length of a full structure name.                                             |
 
 
 * Examples:

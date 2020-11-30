@@ -19,6 +19,7 @@
 #define DEFAULT_CAPITALIZE (false)
 #define DEFAULT_APPEND     (false)
 #define DEFAULT_PREFIX     ("")
+#define DEFAULT_MAX_LENGTH (256)
 
 int plugin_is_GPL_compatible;
 
@@ -27,20 +28,88 @@ struct config {
         const char *output_file;
         const char *separator;
         const char *prefix;
+        size_t max_length;
         bool capitalize;
         bool append;
-};
+} CONFIG;
 
 struct data {
-        struct config config;
         struct attribute_spec attr;
         struct list handled_records;
+        char *name_buffer;
         FILE *outputf;
+        struct {
+                char *mem;
+                size_t current;
+                size_t max;
+        } buffer;
 } DATA;
+
+static char *strncpycap(char *dest, const char *src, size_t len)
+{
+        for (int i = 0; i < len; i++) {
+                dest[i] = TOUPPER(src[i]);
+        }
+        return (dest);
+}
+
+///
+/// Appends the separator and a name to the buffer.
+///
+/// Returns previous "current" position.
+///
+static size_t buffer_append(const char *str)
+{
+        gcc_assert(str != NULL);
+
+        size_t previous_pos = DATA.buffer.current;
+
+        typedef char *(*cpyf)(char *dest, const char *src, size_t len);
+        cpyf f = CONFIG.capitalize ? strncpycap : strncpy;
+
+// -1 for '\0'.
+#define safeappend(STR) \
+        f(&DATA.buffer.mem[DATA.buffer.current], (STR), DATA.buffer.max - DATA.buffer.current - 1)
+
+        // No need to add the separrator at the beginning.
+        if (DATA.buffer.current > 0) {
+                safeappend(CONFIG.separator);
+                DATA.buffer.current += strlen(CONFIG.separator);
+        }
+
+        safeappend(str);
+        DATA.buffer.current += strlen(str);
+#undef safeappend
+
+        if (DATA.buffer.current >= DATA.buffer.max - 1) {
+                DATA.buffer.mem[DATA.buffer.max] = '\0';
+                fprintf(stderr,
+                        "Oops. The names of your structures are too long (or you have too many nested structures).\n"
+                        "Please increase the buffer with the \"max_length\" argument.\n"
+                        "Add -fplugin-arg-extract_offsets-max_length=[new buffer size] to the GCC invocation.\n"
+                        "Right now, the buffer contains: \"%s\"\n",
+                        DATA.buffer.mem);
+                exit(EXIT_FAILURE);
+        }
+        gcc_assert(DATA.buffer.current == strlen(DATA.buffer.mem));
+
+        return (previous_pos);
+}
+
+static void buffer_reset_to(size_t pos)
+{
+        gcc_assert(pos <= DATA.buffer.max);
+
+        // Not an error, but we don't know what is stored there.
+        gcc_assert(pos <= DATA.buffer.current);
+
+        DATA.buffer.current = pos;
+        DATA.buffer.mem[pos] = '\0';
+}
 
 static bool should_export(tree decl)
 {
-        tree attr = lookup_attribute(DATA.config.match_attribute, DECL_ATTRIBUTES(decl));
+        tree attr = lookup_attribute(CONFIG.match_attribute, DECL_ATTRIBUTES(decl));
         return (attr != NULL_TREE);
 }
 
@@ -58,7 +127,7 @@ static bool is_anonymous(tree t)
         return (TYPE_IDENTIFIER(t) == NULL);
 }
 
-static const char *get_name_or_default(tree tnode, const char *def)
+static const char *get_strname(tree tnode)
 {
         gcc_assert(DECL_P(tnode) || TYPE_P(tnode));
         tree t;
@@ -68,7 +137,7 @@ static const char *get_name_or_default(tree tnode, const char *def)
                 t = TYPE_IDENTIFIER(tnode);
         }
 
-        return (t != NULL ? IDENTIFIER_POINTER(t) : def);
+        return (t != NULL ? IDENTIFIER_POINTER(t) : NULL);
 }
 
 static size_t get_field_bitoffset(tree field)
@@ -88,41 +157,13 @@ static size_t get_field_bitoffset(tree field)
         return (overall_offset);
 }
 
-static char *strncpycap(char *dest, const char *src, size_t len)
+static void save_offset(size_t offset)
 {
-        for (int i = 0; i < len; i++) {
-                dest[i] = TOUPPER(src[i]);
-        }
-        return (dest);
-}
-
-static void save_offset(const char *cons_name, const char *field_name, size_t offset)
-{
-        const size_t slen = strlen(cons_name);
-        const size_t flen = strlen(field_name);
-        const size_t seplen = strlen(DATA.config.separator);
-        // 1+ for null char.
-        const size_t len = slen + flen + seplen + 1;
-
-        char *fullname = (char *)xmalloc(len * sizeof(*fullname));
-        gcc_assert(fullname);
-
-        typedef char *(*cpyf)(char *dest, const char *src, size_t len);
-        cpyf f = DATA.config.capitalize ? strncpycap : strncpy;
-
-        f(&fullname[0], cons_name, slen);
-        f(&fullname[slen], DATA.config.separator, seplen);
-        f(&fullname[slen + seplen], field_name, flen);
-        fullname[slen + seplen + flen] = '\0';
-        gcc_assert(strlen(fullname) == len - 1);
-
         gcc_assert(offset % 8 == 0);
-        fprintf(DATA.outputf, "%s%s %zu\n", DATA.config.prefix, fullname, offset / 8);
-
-        free(fullname);
+        fprintf(DATA.outputf, "%s%s %zu\n", CONFIG.prefix, DATA.buffer.mem, offset / 8);
 }
 
-static void process_construct(tree construct, const char *parent_name, size_t base_offset)
+static void process_construct(tree construct, size_t base_offset)
 {
         gcc_assert(struct_or_union(construct));
 
@@ -130,56 +171,47 @@ static void process_construct(tree construct, const char *parent_name, size_t ba
                 return;
         }
 
-        const char *cons_namestr = get_name_or_default(construct, parent_name);
+        size_t precons_pos = 0;
+        bool named_cons = false;
+        {
+                const char *consname = get_strname(construct);
+                if (consname != NULL) {
+                        precons_pos = buffer_append(get_strname(construct));
+                        named_cons = true;
+                }
+        }
 
         for (tree field = TYPE_FIELDS(construct); field != NULL; field = TREE_CHAIN(field)) {
-                const char *field_namestr = get_name_or_default(field, NULL);
                 const size_t field_offset = base_offset + get_field_bitoffset(field);
 
-                if (should_export(field)) {
+                size_t prefield_pos = 0;
+                bool named_field = false;
+                {
+                        const char *field_namestr = get_strname(field);
                         if (field_namestr != NULL) {
-                                save_offset(cons_namestr, field_namestr, field_offset);
-                        } else {
-                                fprintf(stderr, "Can't export the anonymous construct without a name at %s:%d\n",
-                                        DECL_SOURCE_FILE(field), DECL_SOURCE_LINE(field));
+                                prefield_pos = buffer_append(field_namestr);
+                                named_field = true;
                         }
                 }
 
-                tree field_type = TREE_TYPE(field);
+                if (should_export(field)) {
+                        gcc_assert(named_field);
+                        save_offset(field_offset);
+                }
+
                 // If it's not anonymous, we will handle it on another PLUGIN_FINISH_TYPE callback.
+                tree field_type = TREE_TYPE(field);
                 if (struct_or_union(field_type) && is_anonymous(field_type)) {
-                        // Some fields may be anonymous constructs, and don't have names, for example:
-                        // struct some {
-                        //         union {
-                        //                 int64_t ax;
-                        //                 struct {
-                        //                         int32_t ah;
-                        //                         int32_t al;
-                        //                 };
-                        //         };
-                        // } s;
-                        // In this example we can access the fields with as s.ax, s.ah and s.al.
-                        // Therefore, there is no need to mention inner union and struct.
-
-                        if (field_namestr == NULL) {
-                                process_construct(field_type, cons_namestr, field_offset);
-                        } else {
-                                const size_t cons_namelen = strlen(cons_namestr);
-                                const size_t fieldname_len = strlen(field_namestr);
-                                const size_t separator_len = strlen(DATA.config.separator);
-
-                                char *field_fullname = (char *)xmalloc(
-                                        cons_namelen + fieldname_len + separator_len + 1);
-                                strcpy(field_fullname, cons_namestr);
-                                strcpy(&field_fullname[cons_namelen], DATA.config.separator);
-                                strcpy(&field_fullname[cons_namelen + separator_len],
-                                       field_namestr);
-
-                                process_construct(field_type, field_fullname, field_offset);
-
-                                free(field_fullname);
-                        }
+                        process_construct(field_type, field_offset);
                 }
+
+                if (named_field) {
+                        buffer_reset_to(prefield_pos);
+                }
+        }
+
+        if (named_cons) {
+                buffer_reset_to(precons_pos);
         }
 
         list_add(&DATA.handled_records, construct);
@@ -201,7 +233,7 @@ static void process_type(void *gcc_data, void *user_data __unused)
                 return;
         }
 
-        process_construct(type, NULL, 0);
+        process_construct(type, 0);
 }
 
 static void handle_attributes(void *gcc_data __unused, void *user_data __unused)
@@ -213,6 +245,7 @@ static void handle_finish(void *gcc_data __unused, void *user_data __unused)
 {
         list_destroy(&DATA.handled_records);
         fclose(DATA.outputf);
+        free(DATA.buffer.mem);
 }
 
 static struct config parse_args(int argc, struct plugin_argument *argv)
@@ -222,6 +255,7 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
                 .output_file = DEFAULT_OUTPUT,
                 .separator = DEFAULT_SEPARATOR,
                 .prefix = DEFAULT_PREFIX,
+                .max_length = DEFAULT_MAX_LENGTH,
                 .capitalize = DEFAULT_CAPITALIZE,
                 .append = DEFAULT_APPEND,
         };
@@ -243,6 +277,14 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
                         c.prefix = arg.value;
                 } else if (argument_is("append")) {
                         c.append = true;
+                } else if (argument_is("max_length")) {
+                        size_t s = atoi(arg.value);
+                        if (s > 0) {
+                                c.max_length = s;
+                        } else {
+                                fprintf(stderr, "Wrong buffer_size, using default value %zu\n",
+                                        c.max_length);
+                        }
                 } else {
                         fprintf(stderr, "Unknown argument: %s\n", arg.key);
                 }
@@ -254,21 +296,26 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
 int plugin_init(struct plugin_name_args *info, struct plugin_gcc_version *version __unused)
 {
         // TODO: Version check
-        DATA.config = parse_args(info->argc, info->argv);
-        gcc_assert(DATA.config.output_file);
+        CONFIG = parse_args(info->argc, info->argv);
+        gcc_assert(CONFIG.output_file);
 
-        const char *fmode = DATA.config.append ? "a" : "w";
-        DATA.outputf = fopen(DATA.config.output_file, fmode);
+        const char *fmode = CONFIG.append ? "a" : "w";
+        DATA.outputf = fopen(CONFIG.output_file, fmode);
         if (DATA.outputf == NULL) {
                 perror("Couldn't open output file");
                 return (EXIT_FAILURE);
         }
 
         DATA.attr = (struct attribute_spec){
-                DATA.config.match_attribute, 0, 0, false, false, false, false, NULL
+                CONFIG.match_attribute, 0, 0, false, false, false, false, NULL
         };
 
         list_init(&DATA.handled_records);
+
+        DATA.buffer.max = CONFIG.max_length;
+        DATA.buffer.mem = (char *)xmalloc(DATA.buffer.max);
+        gcc_assert(DATA.buffer.mem);
+        DATA.buffer.current = 0;
 
         register_callback(info->base_name, PLUGIN_FINISH_TYPE, process_type, NULL);
         register_callback(info->base_name, PLUGIN_FINISH, handle_finish, NULL);
