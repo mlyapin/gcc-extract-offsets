@@ -82,13 +82,13 @@ static size_t buffer_append(const char *str)
 #undef safeappend
 
         if (DATA.buffer.current >= DATA.buffer.max - 1) {
-                DATA.buffer.mem[DATA.buffer.max] = '\0';
+                DATA.buffer.mem[DATA.buffer.max - 1] = '\0';
                 fprintf(stderr,
                         "Oops. The names of your structures are too long (or you have too many nested structures).\n"
                         "Please increase the buffer with the \"max_length\" argument.\n"
-                        "Add -fplugin-arg-extract_offsets-max_length=[new buffer size] to the GCC invocation.\n"
+                        "For example, try to add -fplugin-arg-extract_offsets-max_length=%zu to the GCC invocation.\n"
                         "Right now, the buffer contains: \"%s\"\n",
-                        DATA.buffer.mem);
+                        DATA.buffer.max << 1, DATA.buffer.mem);
                 exit(EXIT_FAILURE);
         }
         gcc_assert(DATA.buffer.current == strlen(DATA.buffer.mem));
@@ -278,7 +278,7 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
                 } else if (argument_is("append")) {
                         c.append = true;
                 } else if (argument_is("max_length")) {
-                        size_t s = atoi(arg.value);
+                        size_t s = atoi(arg.value != NULL ? arg.value : "");
                         if (s > 0) {
                                 c.max_length = s;
                         } else {
