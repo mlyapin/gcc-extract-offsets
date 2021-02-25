@@ -116,7 +116,7 @@ static bool try_to_remove_attr(tree decl)
         return (false);
 }
 
-static bool struct_or_union(tree t)
+static bool is_struct_or_union(tree t)
 {
         tree type = DECL_P(t) ? TREE_TYPE(t) : t;
 
@@ -160,7 +160,7 @@ static size_t get_field_bitoffset(tree field)
         return (overall_offset);
 }
 
-static void save_offset(size_t offset)
+static void write_current_entry(size_t offset)
 {
         gcc_assert(offset % 8 == 0);
         fprintf(DATA.outputf, "%s%s %zu\n", CONFIG.prefix, DATA.buffer.mem, offset / 8);
@@ -168,7 +168,7 @@ static void save_offset(size_t offset)
 
 static void process_construct(tree construct, size_t base_offset)
 {
-        gcc_assert(struct_or_union(construct));
+        gcc_assert(is_struct_or_union(construct));
 
         size_t precons_pos = 0;
         bool named_cons = false;
@@ -200,12 +200,12 @@ static void process_construct(tree construct, size_t base_offset)
                 // Then, save the field.
                 if (try_to_remove_attr(field)) {
                         gcc_assert(named_field);
-                        save_offset(field_offset);
+                        write_current_entry(field_offset);
                 }
 
                 // If it's not anonymous, we will handle it on another PLUGIN_FINISH_TYPE callback.
                 tree field_type = TREE_TYPE(field);
-                if (struct_or_union(field_type) && is_anonymous(field_type)) {
+                if (is_struct_or_union(field_type) && is_anonymous(field_type)) {
                         process_construct(field_type, field_offset);
                 }
 
@@ -223,7 +223,7 @@ static void process_type(void *gcc_data, void *user_data __unused)
 {
         tree type = (tree)gcc_data;
 
-        if (!struct_or_union(type)) {
+        if (!is_struct_or_union(type)) {
                 return;
         }
 
