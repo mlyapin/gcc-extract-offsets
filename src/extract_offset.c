@@ -11,13 +11,14 @@
 
 #define __unused __attribute__((unused))
 
-#define DEFAULT_SEPARATOR  ("::")
-#define DEFAULT_ATTRIBUTE  ("extract_offset")
-#define DEFAULT_OUTPUT     ("/dev/stdout")
-#define DEFAULT_CAPITALIZE (false)
-#define DEFAULT_APPEND     (false)
-#define DEFAULT_PREFIX     ("")
-#define DEFAULT_MAX_LENGTH (256)
+#define DEFAULT_SEPARATOR   ("::")
+#define DEFAULT_ATTRIBUTE   ("extract_offset")
+#define DEFAULT_OUTPUT      ("/dev/stdout")
+#define DEFAULT_CAPITALIZE  (false)
+#define DEFAULT_APPEND      (false)
+#define DEFAULT_OUTPUT_BITS (false)
+#define DEFAULT_PREFIX      ("")
+#define DEFAULT_MAX_LENGTH  (256)
 
 int plugin_is_GPL_compatible;
 
@@ -29,6 +30,7 @@ struct config {
         size_t max_length;
         bool capitalize;
         bool append;
+        bool output_bits;
 } CONFIG;
 
 struct data {
@@ -82,7 +84,7 @@ static size_t buffer_append(const char *str)
                 fprintf(stderr,
                         "Oops. The names of your structures are too long (or you have too many nested structures).\n"
                         "Please increase the buffer with the \"max_length\" argument.\n"
-                        "For example, try to add -fplugin-arg-extract_offsets-max_length=%zu to the GCC invocation.\n"
+                        "For example, try to add -fplugin-arg-extract_offsets-max_length=%zu to GCC invocation.\n"
                         "Right now, the buffer contains: \"%s\"\n",
                         DATA.buffer.max << 1, DATA.buffer.mem);
                 exit(EXIT_FAILURE);
@@ -162,8 +164,21 @@ static size_t get_field_bitoffset(tree field)
 
 static void write_current_entry(size_t offset)
 {
-        gcc_assert(offset % 8 == 0);
-        fprintf(DATA.outputf, "%s%s %zu\n", CONFIG.prefix, DATA.buffer.mem, offset / 8);
+        if (!CONFIG.output_bits) {
+                if (offset % 8 != 0) {
+                        fprintf(stderr,
+                                "The offset of the \"%s\" field is %lu in bits, "
+                                "but the plugin is configured to write offsets in bytes "
+                                "(%lu %% 8 != 0).\n"
+                                "You can reconfigure the plugin "
+                                "to write offsets in bits by appending "
+                                "\"-fplugin-arg-extract_offsets-output_bits\" to GCC invocation.",
+                                DATA.buffer.mem, offset, offset);
+                        exit(EXIT_FAILURE);
+                }
+                offset /= 8;
+        }
+        fprintf(DATA.outputf, "%s%s %zu\n", CONFIG.prefix, DATA.buffer.mem, offset);
 }
 
 static void process_construct(tree construct, size_t base_offset)
@@ -258,12 +273,13 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
                 .max_length = DEFAULT_MAX_LENGTH,
                 .capitalize = DEFAULT_CAPITALIZE,
                 .append = DEFAULT_APPEND,
+                .output_bits = DEFAULT_OUTPUT_BITS,
         };
 
         for (int i = 0; i < argc; i++) {
                 struct plugin_argument arg = argv[i];
 
-#define argument_is(KEY) (strncmp(arg.key, (KEY), strlen(KEY)) == 0)
+#define argument_is(KEY) (strcmp(arg.key, (KEY)) == 0)
 
                 if (argument_is("attribute")) {
                         c.match_attribute = arg.value;
@@ -277,6 +293,8 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
                         c.prefix = arg.value;
                 } else if (argument_is("append")) {
                         c.append = true;
+                } else if (argument_is("output_bits")) {
+                        c.output_bits = true;
                 } else if (argument_is("max_length")) {
                         size_t s = atoi(arg.value != NULL ? arg.value : "");
                         if (s > 0) {
@@ -287,6 +305,7 @@ static struct config parse_args(int argc, struct plugin_argument *argv)
                         }
                 } else {
                         fprintf(stderr, "Unknown argument: %s\n", arg.key);
+                        exit(EXIT_FAILURE);
                 }
 #undef argument_is
         }
