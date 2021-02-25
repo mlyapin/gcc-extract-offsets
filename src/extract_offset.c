@@ -3,8 +3,6 @@
 #include "stringpool.h"
 #include "attribs.h"
 
-#include "list.h"
-
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,8 +33,6 @@ struct config {
 
 struct data {
         struct attribute_spec attr;
-        struct list handled_records;
-        char *name_buffer;
         FILE *outputf;
         struct {
                 char *mem;
@@ -107,10 +103,17 @@ static void buffer_reset_to(size_t pos)
         DATA.buffer.mem[pos] = '\0';
 }
 
-static bool should_export(tree decl)
+static bool try_to_remove_attr(tree decl)
 {
         tree attr = lookup_attribute(CONFIG.match_attribute, DECL_ATTRIBUTES(decl));
-        return (attr != NULL_TREE);
+        bool has_attr = attr != NULL_TREE;
+        if (has_attr) {
+                tree new_attr_list = remove_attribute(CONFIG.match_attribute, DECL_ATTRIBUTES(decl));
+                /* Hope it won't break anything... */
+                DECL_ATTRIBUTES(decl) = new_attr_list;
+                return (true);
+        }
+        return (false);
 }
 
 static bool struct_or_union(tree t)
@@ -167,10 +170,6 @@ static void process_construct(tree construct, size_t base_offset)
 {
         gcc_assert(struct_or_union(construct));
 
-        if (list_contains(&DATA.handled_records, construct)) {
-                return;
-        }
-
         size_t precons_pos = 0;
         bool named_cons = false;
         {
@@ -194,7 +193,12 @@ static void process_construct(tree construct, size_t base_offset)
                         }
                 }
 
-                if (should_export(field)) {
+                // Try to remove the attribute from a field if it has one.
+                // If we succeed, it means two things:
+                // 1. The attribute was specified in the source file.
+                // 2. It haven't been removed by us earlier, so it's the first time we encounter the field.
+                // Then, save the field.
+                if (try_to_remove_attr(field)) {
                         gcc_assert(named_field);
                         save_offset(field_offset);
                 }
@@ -213,15 +217,12 @@ static void process_construct(tree construct, size_t base_offset)
         if (named_cons) {
                 buffer_reset_to(precons_pos);
         }
-
-        list_add(&DATA.handled_records, construct);
 }
 
 static void process_type(void *gcc_data, void *user_data __unused)
 {
         tree type = (tree)gcc_data;
 
-        // Interested only in structs.
         if (!struct_or_union(type)) {
                 return;
         }
@@ -243,7 +244,6 @@ static void handle_attributes(void *gcc_data __unused, void *user_data __unused)
 
 static void handle_finish(void *gcc_data __unused, void *user_data __unused)
 {
-        list_destroy(&DATA.handled_records);
         fclose(DATA.outputf);
         free(DATA.buffer.mem);
 }
@@ -309,8 +309,6 @@ int plugin_init(struct plugin_name_args *info, struct plugin_gcc_version *versio
         DATA.attr = (struct attribute_spec){
                 CONFIG.match_attribute, 0, 0, false, false, false, false, NULL
         };
-
-        list_init(&DATA.handled_records);
 
         DATA.buffer.max = CONFIG.max_length;
         DATA.buffer.mem = (char *)xmalloc(DATA.buffer.max);
