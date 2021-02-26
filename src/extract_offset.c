@@ -123,7 +123,7 @@ static bool is_struct_or_union(tree t)
 {
         tree type = DECL_P(t) ? TREE_TYPE(t) : t;
 
-        return (TREE_CODE(type) == RECORD_TYPE || TREE_CODE(type) == UNION_TYPE);
+        return (RECORD_OR_UNION_TYPE_P(type));
 }
 
 static bool is_anonymous(tree t)
@@ -232,14 +232,33 @@ static void process_type(void *gcc_data, void *user_data __unused)
                 return;
         }
 
-        // Ignore anonymous structs. They will be handled as parts of parent structures.
-        // There is a problem with global anonymous structures though, so...
-        // TODO: Handle global anonymous structures.
+        // Ignore anonymous structs. They are going to be handled as parts of parent structures,
+        // or as parts of a typedef declaration.
         if (is_anonymous(type)) {
                 return;
         }
 
         size_t prev_pos = buffer_append(get_strname(type));
+        process_construct(type, 0);
+        buffer_reset_to(prev_pos);
+}
+
+static void process_decl(void *gcc_data, void *user_data __unused)
+{
+        tree decl = (tree)gcc_data;
+
+        // Only handle TYPE_DECL.
+        if (!is_typedef_decl(decl)) {
+                return;
+        }
+
+        tree type = TREE_TYPE(decl);
+
+        if (!is_struct_or_union(type)) {
+                return;
+        }
+
+        size_t prev_pos = buffer_append(get_strname(decl));
         process_construct(type, 0);
         buffer_reset_to(prev_pos);
 }
@@ -326,6 +345,7 @@ int plugin_init(struct plugin_name_args *info, struct plugin_gcc_version *versio
         gcc_assert(DATA.buffer.mem);
         DATA.buffer.current = 0;
 
+        register_callback(info->base_name, PLUGIN_FINISH_DECL, process_decl, NULL);
         register_callback(info->base_name, PLUGIN_FINISH_TYPE, process_type, NULL);
         register_callback(info->base_name, PLUGIN_FINISH, handle_finish, NULL);
         register_callback(info->base_name, PLUGIN_ATTRIBUTES, handle_attributes, NULL);
