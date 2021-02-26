@@ -1,37 +1,36 @@
-A GCC plugin that dumps offsets of structure members.
+A GCC plugin prints offsets of structure fields.
 
-It is helpful if you need to write pure assembly, that interacts with C structures.
+Might be of use to you if you need to interact with C structures from an assembly.
+
 
 * Build
 
-To build the plugin, you'll need:
+Requirements to build the plugin:
 - A GCC compatible C++ compiler: g++ or clang++, for example.
 - Target GCC compiler compiled with ~--enable-plugin~ flag.
 
-For example, to build the plugin with g++ for the i686-elf-gcc compiler, run:
+To build the plugin with g++ for the i686-elf-gcc compiler, run:
 
 #+begin_src shell
 $ make CXX=g++ TARGET_GCC=i686-elf-gcc NDEBUG=1 all
 #+end_src
 
-The compiled library will be stored at ~./build/extract_offsets.so~.
-
-To load it into GCC, use the ~-fplugin~ flag.
+Compiled library will be placed at ~./build/extract_offsets.so~.
 
 * Arguments
 
 To pass arguments to the plugin, use the ~-fplugin-arg-extract_offsets-<argument>...~ flag.
 
-The plugin's behavior can be changed with the following arguments:
+The plugin can be configured with the following arguments:
 
 | Argument    | Default          | Explanation                                                                              |
 |-------------+------------------+------------------------------------------------------------------------------------------|
-| separator   | "::"             | Separator for use between the names of structures and fields.                            |
+| separator   | "::"             | Separator to insert between the names of structures and fields.                          |
 | attribute   | "extract_offset" | Export only fields with this attribute.                                                  |
-| output      | "/dev/stdout"    | Output file.                                                                             |
-| capitalize  | /false/          | Flag indicating whether to capitalize the names of structures and fields or leave as is. |
-| prefix      | /none/           | String to prepend to each entry.                                                         |
-| append      | /false/          | Whether to append output to the output file or overwrite the file.                       |
+| output      | "/dev/stdout"    | Output location.                                                                         |
+| capitalize  | /false/          | Indicates whether to capitalize the names of structures and fields or leave them as is.  |
+| prefix      | /none/           | Prefix to prepend to each entry.                                                         |
+| append      | /false/          | Whether to append the output to the output file or overwrite the file.                   |
 | max_length  | 256              | The maximum length of a full structure name.                                             |
 | output_bits | /false/          | Write offsets in bits rather than in bytes.                                              |
 
@@ -40,47 +39,66 @@ The plugin's behavior can be changed with the following arguments:
 
 ** Quick example
 
-For example, if we have the following structure:
+Take a look at this file:
 #+begin_src C
 // test.c
-struct a {
-        int b;
-        int c __attribute__((extract_offset));
-        struct {
-                long long d __attribute__((extract_offset));
-        } e;
+struct struct_1 {
+        int a;
+        union {
+            int b __attribute__((extract_offset));
+            struct {
+                    long long c __attribute__((extract_offset));
+            } d;
+        };
 };
+
+typedef struct {
+        int e __attribute__((extract_offset));
+} struct_2_t;
+
+typedef struct struct_3 {
+        int f __attribute__((extract_offset));
+} struct_3_t;
 #+end_src
 
-Then, we'll get the following output:
+The output for this file is will be:
 
 #+begin_src shell
 $ i686-elf-gcc -S -o /dev/null -fplugin=build/extract_offsets.so test.c
-a::c 4
-a::e::d 8
+struct_1::b 8
+struct_1::d::c 8
+struct_2_t::e 0
+struct_3::f 0
 #+end_src
 
-That tells us that the field ~c~ has an offset of 4 bytes, and the field ~d~ has an offset of 8 bytes from the beginning of ~struct a~.
+/The/ ~-S -o /dev/null~ /flags are not required./
+
+In general, the output corresponds to the following structure:
+
+1. A name of the not-anonymous structure. If the structure is anonymous but is a part of a typedef declaration, then the typedef's name will be used.
+2. /(optional)/ List of the fields from the structure to the exported field.
+3. The name of the exported field.
+4. Offset in bytes (or in bits; see ~output_bits~ argument).
 
 ** Dump preprocessor directives to a C-file:
 
 Also, it's possible to directly dump preprocessor directives to a header file:
 #+begin_src shell
 $ i686-elf-gcc -S -o /dev/null \
-	-fplugin=build/extract_offsets.so \
-	-fplugin-arg-extract_offsets-separator="_" \
-	-fplugin-arg-extract_offsets-capitalize \
-	-fplugin-arg-extract_offsets-prefix="#define OFFSETS_" \
-	-fplugin-arg-extract_offsets-output=result.h \
-	test.c
+    -fplugin=build/extract_offsets.so \
+    -fplugin-arg-extract_offsets-separator="__" \
+    -fplugin-arg-extract_offsets-capitalize \
+    -fplugin-arg-extract_offsets-prefix="#define OFFSETS__" \
+    -fplugin-arg-extract_offsets-output=result.h \
+    test.c
 $ cat result.h
-#define OFFSETS_A_C 4
-#define OFFSETS_A_E_D 8
+#define OFFSETS__STRUCT_1__B 8
+#define OFFSETS__STRUCT_1__D__C 8
+#define OFFSETS__STRUCT_2_T__E 0
+#define OFFSETS__STRUCT_3__F 0
 #+end_src
 
 ** Full example with GAS
-
-So, a somewhat complete example will look like this:
 
 Suppose we have the following files:
 
@@ -125,7 +143,7 @@ int main(void)
         a.template = "Arg1: %d\nArg2: %d\n";
 
         a.args.argument_1 = 10;
-        a.args.argument_2 = INT32_MIN;
+        a.args.argument_2 = 0;
 
         change_args(&a);
 
@@ -136,9 +154,9 @@ int main(void)
 #+end_src
 
 #+begin_src asm
-;; process_args.asm
+// process_args.asm
 
-;; header_offsets.h is the file containing the generated offset.
+// header_offsets.h is the file containing the generated offset.
 #include "header_offsets.h"
 
 .section .text
@@ -156,12 +174,12 @@ change_args:
 Then, you can generate ~header_offsets.h~ with:
 #+begin_src shell
 $ gcc -S -o /dev/null \
-	-fplugin=<path to the plugin> \
-	-fplugin-arg-extract_offsets-capitalize \
-	-fplugin-arg-extract_offsets-prefix="#define OFFSETS__" \
-	-fplugin-arg-extract_offsets-separator="__" \
-	-fplugin-arg-extract_offsets-output=header_offsets.h \
-	header.h
+    -fplugin=<path to the plugin> \
+    -fplugin-arg-extract_offsets-capitalize \
+    -fplugin-arg-extract_offsets-prefix="#define OFFSETS__" \
+    -fplugin-arg-extract_offsets-separator="__" \
+    -fplugin-arg-extract_offsets-output=header_offsets.h \
+    header.h
 $ cat header_offsets.h
 #define OFFSETS__PRINT_ARGS__ARGS__ARGUMENT_1 16
 #+end_src
@@ -172,5 +190,5 @@ $ gcc -c -xassembler-with-cpp process_args.asm
 $ gcc main.c process_args.o
 $ ./a.out
 Arg1: 40
-Arg2: -2147483648
+Arg2: 0
 #+end_src
