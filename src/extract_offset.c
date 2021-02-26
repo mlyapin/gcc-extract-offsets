@@ -1,4 +1,5 @@
 #include "gcc-plugin.h"
+#include "cp/cp-tree.h"
 #include "tree.h"
 #include "stringpool.h"
 #include "attribs.h"
@@ -127,9 +128,7 @@ static bool is_struct_or_union(tree t)
 
 static bool is_anonymous(tree t)
 {
-        tree type = DECL_P(t) ? TREE_TYPE(t) : t;
-
-        return (TYPE_IDENTIFIER(t) == NULL);
+        return (TYPE_IDENTIFIER(t) == NULL || TYPE_ANON_P(t));
 }
 
 static const char *get_strname(tree tnode)
@@ -185,17 +184,12 @@ static void process_construct(tree construct, size_t base_offset)
 {
         gcc_assert(is_struct_or_union(construct));
 
-        size_t precons_pos = 0;
-        bool named_cons = false;
-        {
-                const char *consname = get_strname(construct);
-                if (consname != NULL) {
-                        precons_pos = buffer_append(get_strname(construct));
-                        named_cons = true;
-                }
-        }
-
         for (tree field = TYPE_FIELDS(construct); field != NULL; field = TREE_CHAIN(field)) {
+                /* Not interested in compiler's internal fields. */
+                if (DECL_ARTIFICIAL(field)) {
+                        continue;
+                }
+
                 const size_t field_offset = base_offset + get_field_bitoffset(field);
 
                 size_t prefield_pos = 0;
@@ -228,10 +222,6 @@ static void process_construct(tree construct, size_t base_offset)
                         buffer_reset_to(prefield_pos);
                 }
         }
-
-        if (named_cons) {
-                buffer_reset_to(precons_pos);
-        }
 }
 
 static void process_type(void *gcc_data, void *user_data __unused)
@@ -249,7 +239,9 @@ static void process_type(void *gcc_data, void *user_data __unused)
                 return;
         }
 
+        size_t prev_pos = buffer_append(get_strname(type));
         process_construct(type, 0);
+        buffer_reset_to(prev_pos);
 }
 
 static void handle_attributes(void *gcc_data __unused, void *user_data __unused)
